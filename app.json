@@ -1,30 +1,66 @@
 {
   "expo": {
-    "name": "StickerExpo",
-    "slug": "StickerExpo",
-    "version": "1.0.0",
+    "name": "FastSticker",
+    "slug": "fast-sticker",
+    "version": "1.0.2",
+    "scheme": "faststicker",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "fallbackToCacheTimeout": 0
+    },
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.crosshyper.faststicker",
+      "buildNumber": "3",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Sticker oluşturmak için kamerana erişmemiz gerekiyor.",
+        "NSPhotoLibraryUsageDescription": "Sticker oluşturmak için galerinden fotoğraf seçebilmen gerekiyor.",
+        "NSPhotoLibraryAddUsageDescription": "Oluşturduğun stickerları galerine kaydetmek için izin gerekiyor."
+      }
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.crosshyper.faststicker",
+      "versionCode": 3,
+      "permissions": [
+        "CAMERA",
+        "READ_MEDIA_IMAGES",
+        "READ_EXTERNAL_STORAGE"
+      ],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
     },
     "web": {
-      "favicon": "./assets/favicon.png"
-    }
+      "favicon": "./assets/icon.png"
+    },
+    "plugins": [
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Sticker oluşturmak için galerinden fotoğraf seçebilmen gerekiyor.",
+          "cameraPermission": "Sticker oluşturmak için kameranı kullanabilmen gerekiyor."
+        }
+      ]
+    ]
   }
 }
