@@ -12,7 +12,6 @@ import {
 import { MaterialIcons } from '@expo/vector-icons';
 import { Screen, NavigationProps, Sticker } from '../types';
 import { Colors, Shadows } from '../theme/colors';
-import { shareStickerToWhatsApp } from '../services/stickerService';
 import { useApp } from '../context/AppContext';
 
 const { width } = Dimensions.get('window');
@@ -30,22 +29,21 @@ export const DetailFlow: React.FC<Props> = ({
   selectedSticker,
   onDelete,
 }) => {
-  const { isDarkMode } = useApp();
+  const { isDarkMode, startPackSelection } = useApp();
   const colors = isDarkMode ? Colors.dark : Colors.light;
 
-  const shareToWhatsApp = async () => {
-    const imageUri = selectedSticker?.imageUrl || selectedSticker?.url;
-    if (!imageUri) {
-      Alert.alert('Paylaşım Hatası', 'Paylaşılacak sticker görseli bulunamadı.');
+  const shareToWhatsApp = () => {
+    if (!selectedSticker?.id) {
+      Alert.alert('Hata', 'Sticker bulunamadı.');
       return;
     }
 
-    try {
-      await shareStickerToWhatsApp(imageUri);
-    } catch (error) {
-      console.error('Share failed', error);
-      Alert.alert('Paylaşım Hatası', "Sticker WhatsApp'a gönderilemedi.");
-    }
+    startPackSelection([selectedSticker.id]);
+    Alert.alert(
+      'Sticker Paketi',
+      'WhatsApp için en az 3 sticker seçmelisin. Koleksiyonda 2 tane daha seçip “Aktar”a bas.'
+    );
+    navigate(Screen.COLLECTION);
   };
 
   if (screen === Screen.STICKER_DETAIL) {
@@ -97,7 +95,7 @@ export const DetailFlow: React.FC<Props> = ({
           <View style={styles.actionButtons}>
             <TouchableOpacity style={[styles.actionButton, { backgroundColor: Colors.success }]} onPress={shareToWhatsApp}>
               <MaterialIcons name="send" size={24} color={Colors.white} />
-              <Text style={styles.actionButtonText}>WhatsApp'a Gönder</Text>
+              <Text style={styles.actionButtonText}>WhatsApp Paketi (3+)</Text>
             </TouchableOpacity>
 
             <View style={styles.secondaryActions}>

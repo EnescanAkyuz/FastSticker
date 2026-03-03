@@ -9,11 +9,13 @@ import {
   Dimensions,
   Animated,
   Switch,
+  Alert,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Screen, NavigationProps, Sticker } from '../types';
 import { Colors, Shadows } from '../theme/colors';
 import { useApp } from '../context/AppContext';
+import { isWhatsAppPackExportAvailable, shareStickersToWhatsApp } from '../services/stickerService';
 
 const { width, height } = Dimensions.get('window');
 
@@ -30,11 +32,23 @@ export const MainFlow: React.FC<Props> = ({
   stickers,
   onStickerSelect,
 }) => {
-  const { isDarkMode, toggleDarkMode, isPremium, remainingCredits, setIsPremium } = useApp();
+  const {
+    isDarkMode,
+    toggleDarkMode,
+    isPremium,
+    remainingCredits,
+    setIsPremium,
+    isPackSelectionMode,
+    packSelectedStickerIds,
+    startPackSelection,
+    cancelPackSelection,
+    togglePackSticker,
+  } = useApp();
   const colors = isDarkMode ? Colors.dark : Colors.light;
 
   const [selectedFilter, setSelectedFilter] = useState('Tümü');
   const [notifications, setNotifications] = useState(true);
+  const [isExportingPack, setIsExportingPack] = useState(false);
 
   if (screen === Screen.HOME) {
     const filters = ['Tümü', 'Animasyon', 'Çizgi Film', 'Karikatür', 'Emoji'];
@@ -44,9 +58,6 @@ export const MainFlow: React.FC<Props> = ({
       <View style={[styles.container, { backgroundColor: colors.background }]}>
         <View style={styles.header}>
           <View style={styles.logoContainer}>
-            <View style={styles.logoIcon}>
-              <MaterialIcons name="auto-awesome" size={24} color={Colors.white} />
-            </View>
             <Text style={[styles.logoText, { color: colors.text }]}>FastSticker</Text>
           </View>
 
@@ -243,15 +254,68 @@ export const MainFlow: React.FC<Props> = ({
   }
 
   if (screen === Screen.COLLECTION) {
+    const selectedStickers = stickers.filter((sticker) => packSelectedStickerIds.includes(sticker.id));
+    const selectedStickerUris = selectedStickers
+      .map((sticker) => sticker.imageUrl || sticker.url)
+      .filter((uri): uri is string => typeof uri === 'string' && uri.length > 0);
+    const selectedCount = selectedStickerUris.length;
+    const isPackExportAvailable = isWhatsAppPackExportAvailable();
+
+    const exportSelectedAsPack = async () => {
+      if (isExportingPack) {
+        return;
+      }
+
+      if (selectedCount < 3) {
+        Alert.alert('Sticker Paketi', `WhatsApp için en az 3 sticker seçmelisin. (${selectedCount}/3)`);
+        return;
+      }
+
+      if (!isPackExportAvailable) {
+        Alert.alert(
+          'Dev Build Gerekli',
+          "WhatsApp paket aktarimi Expo Go'da calismaz.\n\n1) npx expo run:android\n2) Telefonunda Expo Go yerine app'in dev buildini ac\n3) Tekrar Paket Aktar"
+        );
+        return;
+      }
+
+      try {
+        setIsExportingPack(true);
+        await shareStickersToWhatsApp(selectedStickerUris, 'FastSticker');
+        Alert.alert('Hazır!', "WhatsApp'a geçip sticker paketini ekleyebilirsin.");
+        cancelPackSelection();
+      } catch (error: any) {
+        console.error('Pack export failed', error);
+        Alert.alert(
+          'Aktarım Hatası',
+          error?.message || "Sticker paketi WhatsApp'a aktarılamadı. WhatsApp'ın yüklü olduğundan emin ol."
+        );
+      } finally {
+        setIsExportingPack(false);
+      }
+    };
+
     return (
       <View style={[styles.container, { backgroundColor: colors.background }]}>
         <View style={styles.collectionHeader}>
-          <TouchableOpacity onPress={goBack} style={styles.backButton}>
+          <TouchableOpacity
+            onPress={() => {
+              if (isPackSelectionMode) {
+                cancelPackSelection();
+              }
+              goBack();
+            }}
+            style={styles.backButton}
+          >
             <MaterialIcons name="arrow-back" size={24} color={colors.text} />
           </TouchableOpacity>
           <Text style={[styles.collectionTitle, { color: colors.text }]}>Koleksiyonum</Text>
-          <TouchableOpacity>
-            <MaterialIcons name="more-vert" size={24} color={colors.text} />
+          <TouchableOpacity
+            onPress={() => (isPackSelectionMode ? cancelPackSelection() : startPackSelection())}
+            accessibilityRole="button"
+            accessibilityLabel={isPackSelectionMode ? 'Seçimi iptal et' : 'Paket için sticker seç'}
+          >
+            <MaterialIcons name={isPackSelectionMode ? 'close' : 'playlist-add-check'} size={24} color={colors.text} />
           </TouchableOpacity>
         </View>
 
@@ -273,19 +337,67 @@ export const MainFlow: React.FC<Props> = ({
           </View>
         </View>
 
-        <ScrollView showsVerticalScrollIndicator={false}>
+        <View style={styles.packActionsRow}>
+          <TouchableOpacity
+            style={[
+              styles.packActionButton,
+              { backgroundColor: isPackSelectionMode ? colors.surface : Colors.primary },
+            ]}
+            onPress={() => (isPackSelectionMode ? cancelPackSelection() : startPackSelection())}
+            activeOpacity={0.9}
+          >
+            <MaterialIcons
+              name={isPackSelectionMode ? 'close' : 'local-offer'}
+              size={18}
+              color={isPackSelectionMode ? colors.text : Colors.white}
+            />
+            <Text style={[styles.packActionText, { color: isPackSelectionMode ? colors.text : Colors.white }]}>
+              {isPackSelectionMode ? 'Seçimi İptal Et' : 'Sticker Paketi Oluştur (3+)'}
+            </Text>
+          </TouchableOpacity>
+
+          {isPackSelectionMode && (
+            <View style={[styles.packSelectionPill, { backgroundColor: colors.surface }]}>
+              <MaterialIcons name="check-circle" size={16} color={Colors.primary} />
+              <Text style={[styles.packSelectionText, { color: colors.text }]}>{selectedCount}/3 seçildi</Text>
+            </View>
+          )}
+        </View>
+
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={isPackSelectionMode ? { paddingBottom: 92 } : undefined}>
           <View style={styles.collectionGrid}>
             {stickers.map((sticker) => (
               <TouchableOpacity
                 key={sticker.id}
-                style={[styles.collectionItem, Shadows.small]}
+                style={[
+                  styles.collectionItem,
+                  Shadows.small,
+                  isPackSelectionMode && packSelectedStickerIds.includes(sticker.id)
+                    ? styles.collectionItemSelected
+                    : null,
+                ]}
                 onPress={() => {
+                  if (isPackSelectionMode) {
+                    togglePackSticker(sticker.id);
+                    return;
+                  }
                   onStickerSelect(sticker);
                   navigate(Screen.STICKER_DETAIL);
                 }}
               >
                 {sticker.imageUrl || sticker.url ? (
-                  <Image source={{ uri: sticker.imageUrl || sticker.url }} style={styles.collectionImage} />
+                  <>
+                    <Image source={{ uri: sticker.imageUrl || sticker.url }} style={styles.collectionImage} />
+                    {isPackSelectionMode && (
+                      <View style={styles.selectionBadge}>
+                        <MaterialIcons
+                          name={packSelectedStickerIds.includes(sticker.id) ? 'check-circle' : 'radio-button-unchecked'}
+                          size={20}
+                          color={packSelectedStickerIds.includes(sticker.id) ? Colors.primary : Colors.white}
+                        />
+                      </View>
+                    )}
+                  </>
                 ) : (
                   <View style={styles.stickerPlaceholder}>
                     <MaterialIcons name="image" size={28} color={colors.textSecondary} />
@@ -295,6 +407,29 @@ export const MainFlow: React.FC<Props> = ({
             ))}
           </View>
         </ScrollView>
+
+        {isPackSelectionMode && (
+          <View style={[styles.packBottomBar, { backgroundColor: colors.surface }]}>
+            <View style={styles.packBottomLeft}>
+              <Text style={[styles.packBottomTitle, { color: colors.text }]}>WhatsApp Paketi</Text>
+              <Text style={[styles.packBottomSubtitle, { color: colors.textSecondary }]}>
+                {selectedCount < 3 ? `${selectedCount}/3 seçildi` : `${selectedCount} sticker seçildi`}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[
+                styles.packBottomButton,
+                { backgroundColor: selectedCount >= 3 && !isExportingPack ? Colors.success : colors.textSecondary },
+              ]}
+              onPress={exportSelectedAsPack}
+              disabled={selectedCount < 3 || isExportingPack}
+              activeOpacity={0.9}
+            >
+              <MaterialIcons name="send" size={18} color={Colors.white} />
+              <Text style={styles.packBottomButtonText}>{isExportingPack ? 'Aktarılıyor…' : 'Aktar'}</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
     );
   }
@@ -476,7 +611,7 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 20, paddingTop: 48, paddingBottom: 16,
+    paddingHorizontal: 20, paddingTop: 16, paddingBottom: 16,
   },
   logoContainer: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   logoIcon: {
@@ -573,7 +708,70 @@ const styles = StyleSheet.create({
   collectionItem: {
     width: (width - 64) / 3, aspectRatio: 1, borderRadius: 16, backgroundColor: Colors.white, overflow: 'hidden',
   },
+  collectionItemSelected: {
+    borderWidth: 2,
+    borderColor: Colors.primary,
+  },
   collectionImage: { width: '100%', height: '100%' },
+  selectionBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+  },
+  packActionsRow: {
+    paddingHorizontal: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 16,
+  },
+  packActionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+  },
+  packActionText: { fontSize: 13, fontWeight: '800' },
+  packSelectionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 14,
+  },
+  packSelectionText: { fontSize: 13, fontWeight: '700' },
+  packBottomBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,0,0,0.06)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  packBottomLeft: { flex: 1 },
+  packBottomTitle: { fontSize: 14, fontWeight: '800' },
+  packBottomSubtitle: { fontSize: 12, marginTop: 2 },
+  packBottomButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 14,
+  },
+  packBottomButtonText: { color: Colors.white, fontSize: 13, fontWeight: '800' },
   settingsContent: { flex: 1, paddingHorizontal: 20 },
   premiumBanner: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.primary,
@@ -636,3 +834,4 @@ const styles = StyleSheet.create({
   subscribeText: { fontSize: 18, fontWeight: '800', color: Colors.black },
   termsText: { fontSize: 12, textAlign: 'center', marginTop: 16 },
 });
+

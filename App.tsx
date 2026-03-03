@@ -1,6 +1,9 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { StatusBar, ActivityIndicator, Text, StyleSheet } from 'react-native';
+import { StatusBar, ActivityIndicator, Text, StyleSheet, LogBox } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { Screen, Sticker, StickerDraft } from './src/types';
 import { Colors } from './src/theme/colors';
 import { AppProvider, useApp } from './src/context/AppContext';
@@ -8,6 +11,36 @@ import { OnboardingFlow } from './src/screens/OnboardingFlow';
 import { MainFlow } from './src/screens/MainFlow';
 import { CreationFlow } from './src/screens/CreationFlow';
 import { DetailFlow } from './src/screens/DetailFlow';
+import { log } from './src/utils/logger';
+import { LogOverlay } from './src/utils/LogOverlay';
+
+const PENDING_PICKER_KEY = 'pending_picker_result';
+
+// Enable all logging in development
+LogBox.ignoreLogs([
+  'Non-serializable values were found in the navigation state',
+  'We detected a screen with an undefined initialRouteName',
+]);
+
+// ── Global error handlers ────────────────────────────────────────────────────
+// Catches synchronous JS errors that bubble past all error boundaries
+if (typeof ErrorUtils !== 'undefined') {
+  const prevHandler = ErrorUtils.getGlobalHandler();
+  ErrorUtils.setGlobalHandler((error: Error, isFatal?: boolean) => {
+    log.fatal('GlobalHandler', `${isFatal ? '[FATAL] ' : ''}${error?.message}`, error);
+    if (prevHandler) prevHandler(error, isFatal);
+  });
+}
+
+// Catches unhandled Promise rejections
+const _origUnhandledRejection = (global as any).onunhandledrejection;
+(global as any).onunhandledrejection = (event: any) => {
+  const reason = event?.reason ?? event;
+  log.error('UnhandledRejection', String(reason?.message ?? reason), reason);
+  if (_origUnhandledRejection) _origUnhandledRejection(event);
+};
+
+log.info('App', '=== App module loaded ===');
 
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -20,7 +53,14 @@ class AppErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('Unhandled application error', error, errorInfo);
+    log.fatal('ErrorBoundary', error.message, error);
+    log.error('ErrorBoundary', 'Component stack:' + errorInfo.componentStack);
+    console.error('========== APP ERROR BOUNDARY CAUGHT ERROR ==========');
+    console.error('Error:', error);
+    console.error('Error message:', error.message);
+    console.error('Stack trace:', error.stack);
+    console.error('Component stack:', errorInfo.componentStack);
+    console.error('===============================================');
   }
 
   render() {
@@ -49,6 +89,9 @@ const AppContent: React.FC = () => {
     stickers,
     addSticker,
     deleteSticker,
+    packAfterCreate,
+    setPackAfterCreate,
+    startPackSelection,
     isHydrated,
   } = useApp();
   const colors = isDarkMode ? Colors.dark : Colors.light;
@@ -67,6 +110,77 @@ const AppContent: React.FC = () => {
     setCurrentScreen(hasCompletedOnboarding ? Screen.HOME : Screen.SPLASH);
     setIsNavigationReady(true);
   }, [hasCompletedOnboarding, isHydrated, isNavigationReady]);
+
+  // ── Recover picker result after Android process death ────────────────────────
+  // When Samsung (or any Android) kills the app process while the camera/gallery
+  // Activity is in the foreground, Expo stores the picker result natively.
+  // On the next app launch we retrieve it here and restore the creation flow.
+  useEffect(() => {
+    if (!isNavigationReady) return;
+
+    const recoverPendingPickerResult = async () => {
+      try {
+        // Only attempt recovery if we had an active picker session
+        const flag = await AsyncStorage.getItem(PENDING_PICKER_KEY);
+        log.info('App', `Pending picker flag: ${flag}`);
+        if (!flag) return;
+
+        log.info('App', 'Process-death recovery: calling getPendingResultAsync…');
+        const pendingRaw = await ImagePicker.getPendingResultAsync();
+        log.info('App', 'getPendingResultAsync returned', pendingRaw);
+
+        // Clear the flag regardless of outcome
+        await AsyncStorage.removeItem(PENDING_PICKER_KEY);
+
+        // getPendingResultAsync can return ImagePickerErrorResult which lacks `canceled`/`assets`
+        const pending = (pendingRaw && 'canceled' in pendingRaw)
+          ? (pendingRaw as ImagePicker.ImagePickerResult)
+          : null;
+
+        if (!pending || pending.canceled || !pending.assets?.[0]?.uri) {
+          log.info('App', 'No usable pending picker result — nothing to restore');
+          return;
+        }
+
+        const asset = pending.assets[0];
+        log.info('App', `Recovering image: uri=${asset.uri} ${asset.width}x${asset.height}`);
+
+        // Center-crop → resize to 512x512, identical to pickImage in CreationFlow
+        const srcW = asset.width ?? 1024;
+        const srcH = asset.height ?? 1024;
+        const squareSize = Math.min(srcW, srcH);
+        const originX = Math.floor((srcW - squareSize) / 2);
+        const originY = Math.floor((srcH - squareSize) / 2);
+
+        const compressed = await ImageManipulator.manipulateAsync(
+          asset.uri,
+          [
+            { crop: { originX, originY, width: squareSize, height: squareSize } },
+            { resize: { width: 512, height: 512 } },
+          ],
+          { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: false }
+        );
+
+        log.info('App', `Recovered image processed: ${compressed.uri}`);
+
+        setStickerDraft({
+          originalImage: compressed.uri,
+          processedImage: compressed.uri,
+          style: null,
+          text: null,
+        });
+
+        // Navigate into the creation flow at the CROP step
+        setScreenHistory([Screen.HOME, Screen.SOURCE_SELECT]);
+        setCurrentScreen(Screen.CROP);
+        log.info('App', 'Process-death recovery complete — navigated to CROP');
+      } catch (err) {
+        log.error('App', 'Process-death recovery failed', err);
+      }
+    };
+
+    recoverPendingPickerResult();
+  }, [isNavigationReady]);
 
   const navigate = useCallback(
     (screen: Screen) => {
@@ -118,10 +232,19 @@ const AppContent: React.FC = () => {
       };
       addSticker(newSticker);
       setStickerDraft(null);
+
+      if (packAfterCreate) {
+        setPackAfterCreate(false);
+        startPackSelection([newSticker.id]);
+        setScreenHistory([Screen.HOME]);
+        setCurrentScreen(Screen.COLLECTION);
+        return;
+      }
+
       setScreenHistory([]);
       setCurrentScreen(Screen.HOME);
     }
-  }, [stickerDraft, stickers.length, addSticker]);
+  }, [stickerDraft, stickers.length, addSticker, packAfterCreate, setPackAfterCreate, startPackSelection]);
 
   const handleDeleteSticker = useCallback(() => {
     if (selectedSticker) {
@@ -207,6 +330,7 @@ const AppContent: React.FC = () => {
         backgroundColor={colors.background}
       />
       {renderScreen()}
+      <LogOverlay />
     </SafeAreaView>
   );
 };

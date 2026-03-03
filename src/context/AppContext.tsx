@@ -16,6 +16,13 @@ const defaultContext: AppContextType = {
   resetDraft: () => {},
   selectedStickerId: null,
   setSelectedStickerId: () => {},
+  isPackSelectionMode: false,
+  packSelectedStickerIds: [],
+  startPackSelection: () => {},
+  cancelPackSelection: () => {},
+  togglePackSticker: () => {},
+  packAfterCreate: false,
+  setPackAfterCreate: () => {},
   credits: 5,
   remainingCredits: 5,
   decrementCredits: () => {},
@@ -41,6 +48,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [stickers, setStickers] = useState<Sticker[]>([]);
   const [draft, setDraft] = useState<StickerDraft>({});
   const [selectedStickerId, setSelectedStickerId] = useState<string | null>(null);
+  const [isPackSelectionMode, setIsPackSelectionMode] = useState(false);
+  const [packSelectedStickerIds, setPackSelectedStickerIds] = useState<string[]>([]);
+  const [packAfterCreate, setPackAfterCreate] = useState(false);
   const [credits, setCredits] = useState<number>(5);
   const [isHydrated, setIsHydrated] = useState(false);
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState<boolean>(false);
@@ -139,6 +149,22 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setIsDarkMode((prev) => !prev);
   };
 
+  const startPackSelection = (preselectedIds: string[] = []) => {
+    setIsPackSelectionMode(true);
+    setPackSelectedStickerIds(preselectedIds);
+  };
+
+  const cancelPackSelection = () => {
+    setIsPackSelectionMode(false);
+    setPackSelectedStickerIds([]);
+  };
+
+  const togglePackSticker = (stickerId: string) => {
+    setPackSelectedStickerIds((prev) =>
+      prev.includes(stickerId) ? prev.filter((id) => id !== stickerId) : [...prev, stickerId]
+    );
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -151,6 +177,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         resetDraft,
         selectedStickerId,
         setSelectedStickerId,
+        isPackSelectionMode,
+        packSelectedStickerIds,
+        startPackSelection,
+        cancelPackSelection,
+        togglePackSticker,
+        packAfterCreate,
+        setPackAfterCreate,
         credits,
         remainingCredits: credits,
         decrementCredits,

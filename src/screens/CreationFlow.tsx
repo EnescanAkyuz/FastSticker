@@ -14,10 +14,16 @@ import {
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
+import { File } from 'expo-file-system';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Screen, NavigationProps, StickerDraft } from '../types';
 import { Colors, Shadows } from '../theme/colors';
-import { generateStickerWithGemini, shareStickerToWhatsApp } from '../services/stickerService';
+import { generateStickerWithGemini } from '../services/stickerService';
 import { useApp } from '../context/AppContext';
+import { log } from '../utils/logger';
+
+const TAG = 'CreationFlow';
 
 const { width, height } = Dimensions.get('window');
 
@@ -36,7 +42,7 @@ export const CreationFlow: React.FC<Props> = ({
   onDraftUpdate,
   onComplete,
 }) => {
-  const { isDarkMode } = useApp();
+  const { isDarkMode, setPackAfterCreate } = useApp();
   const colors = isDarkMode ? Colors.dark : Colors.light;
 
   const [selectedStyle, setSelectedStyle] = useState<string | null>(null);
@@ -82,7 +88,7 @@ export const CreationFlow: React.FC<Props> = ({
         const generatedUri = await generateStickerWithGemini({
           sourceImageUri,
           style: styleToUse,
-          text: draft?.text || stickerText,
+          text: draft?.text || '',
         });
 
         if (isCancelled) {
@@ -122,7 +128,6 @@ export const CreationFlow: React.FC<Props> = ({
     onDraftUpdate,
     screen,
     selectedStyle,
-    stickerText,
   ]);
 
   useEffect(() => {
@@ -135,50 +140,141 @@ export const CreationFlow: React.FC<Props> = ({
   }, [screen, draft?.style, draft?.text]);
 
   const pickImage = async (fromCamera: boolean) => {
+    log.info(TAG, `pickImage() start — fromCamera=${fromCamera}`);
     try {
-      let result: ImagePicker.ImagePickerResult;
 
+      // ── 1. Permissions ────────────────────────────────────────────────────
       if (fromCamera) {
+        log.debug(TAG, 'Requesting camera permission…');
         const permission = await ImagePicker.requestCameraPermissionsAsync();
+        log.info(TAG, `Camera permission result: granted=${permission.granted} status=${permission.status}`);
         if (!permission.granted) {
           Alert.alert('İzin Gerekli', 'Kamera ile sticker oluşturmak için kamera izni vermelisin.');
+          log.warn(TAG, 'Camera permission denied — aborting');
           return;
         }
+      } else {
+        log.debug(TAG, 'Requesting media library permission…');
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        log.info(TAG, `Media library permission result: granted=${permission.granted} status=${permission.status}`);
+        if (!permission.granted) {
+          Alert.alert('İzin Gerekli', 'Galeriden fotoğraf seçmek için galeri izni vermelisin.');
+          log.warn(TAG, 'Media library permission denied — aborting');
+          return;
+        }
+      }
+
+      // ── 2. Launch picker ─────────────────────────────────────────────────
+      let result: ImagePicker.ImagePickerResult;
+
+      // Mark that we are about to enter a picker session.
+      // If Android kills this process and restarts it (Samsung memory management),
+      // App.tsx reads this flag on startup and calls getPendingResultAsync().
+      await AsyncStorage.setItem('pending_picker_result', 'true');
+      log.debug(TAG, 'pending_picker_result flag set in AsyncStorage');
+
+      if (fromCamera) {
+        log.info(TAG, 'Launching camera (allowsEditing=true, 1:1, quality=0.5)…');
         result = await ImagePicker.launchCameraAsync({
           mediaTypes: ['images'],
           allowsEditing: true,
           aspect: [1, 1],
-          quality: 1,
+          quality: 0.5,
         });
+        log.info(TAG, 'launchCameraAsync() returned');
       } else {
-        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (!permission.granted) {
-          Alert.alert('İzin Gerekli', 'Galeriden fotoğraf seçmek için galeri izni vermelisin.');
-          return;
-        }
+        log.info(TAG, 'Launching gallery (allowsEditing=false, quality=0.8)…');
         result = await ImagePicker.launchImageLibraryAsync({
           mediaTypes: ['images'],
-          allowsEditing: true,
-          aspect: [1, 1],
-          quality: 1,
+          // allowsEditing disabled: native Samsung/AOSP cropper crashes on many devices.
+          // We center-crop manually with ImageManipulator below.
+          allowsEditing: false,
+          quality: 0.8,
         });
+        log.info(TAG, 'launchImageLibraryAsync() returned');
       }
 
-      const selectedAsset = result.canceled ? null : result.assets[0];
-      if (!selectedAsset?.uri) {
+      // ── 3. Validate result ────────────────────────────────────────────────
+      log.debug(TAG, `Picker result: canceled=${result.canceled}, assetsCount=${(result as any).assets?.length ?? 'n/a'}`);
+
+      const selectedAsset = result.canceled ? null : result.assets?.[0];
+      if (!selectedAsset) {
+        log.info(TAG, 'No asset returned (user cancelled or picker returned empty)');
         return;
       }
 
-      onDraftUpdate({
-        originalImage: selectedAsset.uri,
-        processedImage: selectedAsset.uri,
-        style: null,
-        text: null,
-      });
-      navigate(Screen.CROP);
-    } catch (error) {
-      console.error('Image pick failed', error);
-      Alert.alert('Hata', 'Fotoğraf seçilirken bir hata oluştu. Lütfen tekrar dene.');
+      log.info(TAG, `Asset selected: uri=${selectedAsset.uri}`);
+      log.debug(TAG, `Asset metadata: w=${selectedAsset.width} h=${selectedAsset.height} type=${selectedAsset.type} mimeType=${(selectedAsset as any).mimeType} fileSize=${selectedAsset.fileSize}`);
+
+      if (!selectedAsset.uri) {
+        log.error(TAG, 'selectedAsset.uri is empty — aborting');
+        return;
+      }
+
+      // ── 4. Image manipulation ─────────────────────────────────────────────
+      try {
+        const srcW = selectedAsset.width ?? 1024;
+        const srcH = selectedAsset.height ?? 1024;
+        const squareSize = Math.min(srcW, srcH);
+        const originX = Math.floor((srcW - squareSize) / 2);
+        const originY = Math.floor((srcH - squareSize) / 2);
+
+        log.info(TAG, `Start center-crop → resize: src=${srcW}x${srcH} square=${squareSize} origin=(${originX},${originY})`);
+
+        const compressedImage = await ImageManipulator.manipulateAsync(
+          selectedAsset.uri,
+          [
+            { crop: { originX, originY, width: squareSize, height: squareSize } },
+            { resize: { width: 512, height: 512 } },
+          ],
+          { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: false }
+        );
+
+        log.info(TAG, `ImageManipulator done: uri=${compressedImage.uri} w=${compressedImage.width} h=${compressedImage.height}`);
+
+        if (!compressedImage.uri) {
+          throw new Error('ImageManipulator returned an empty URI');
+        }
+
+        // ── 5. Verify file on disk ──────────────────────────────────────────
+        log.debug(TAG, 'Checking compressed file existence on disk…');
+        try {
+          const fileInfo = new File(compressedImage.uri).info();
+          log.info(TAG, `File info: exists=${fileInfo.exists} size=${(fileInfo as any).size ?? 'n/a'}`);
+          if (!fileInfo.exists) {
+            throw new Error('Compressed image file does not exist at: ' + compressedImage.uri);
+          }
+        } catch (fileCheckError) {
+          log.error(TAG, 'File info check failed', fileCheckError);
+          throw new Error('Dosya doğrulanamadı: ' + (fileCheckError instanceof Error ? fileCheckError.message : String(fileCheckError)));
+        }
+
+        // ── 6. Update draft & navigate ──────────────────────────────────────
+        log.info(TAG, 'Updating draft and navigating to CROP screen…');
+        onDraftUpdate({
+          originalImage: compressedImage.uri,
+          processedImage: compressedImage.uri,
+          style: null,
+          text: null,
+        });
+        log.info(TAG, 'Draft updated — navigating to Screen.CROP');
+        // Successfully processed: clear the pending flag so App.tsx won't attempt recovery
+        await AsyncStorage.removeItem('pending_picker_result');
+        navigate(Screen.CROP);
+
+      } catch (manipError) {
+        log.error(TAG, 'Image manipulation/verification failed', manipError);
+        const msg = manipError instanceof Error ? manipError.message : String(manipError);
+        Alert.alert(
+          'Sıkıştırma Hatası',
+          `Fotoğraf işlenirken bir hata oluştu:\n\n${msg}\n\nLütfen daha küçük bir fotoğraf seç ve tekrar dene.`
+        );
+      }
+
+    } catch (outerError) {
+      log.fatal(TAG, 'pickImage() outer catch — unhandled error', outerError);
+      const msg = outerError instanceof Error ? outerError.message : String(outerError);
+      Alert.alert('Hata', `Fotoğraf seçilirken bir hata oluştu:\n\n${msg}\n\nLütfen tekrar dene.`);
     }
   };
 
@@ -189,7 +285,11 @@ export const CreationFlow: React.FC<Props> = ({
 
     setIsSharing(true);
     try {
-      await shareStickerToWhatsApp(draftImageUri);
+      setPackAfterCreate(true);
+      Alert.alert(
+        'Sticker Paketi',
+        'WhatsApp sticker olarak eklemek için en az 3 sticker seçip paket halinde aktarmalısın. Sticker kaydedilecek ve Koleksiyonum ekranında seçim modu açılacak; 2 tane daha seçip “Aktar”a bas.'
+      );
     } catch (error) {
       console.error('Share failed', error);
       Alert.alert(
@@ -305,7 +405,14 @@ export const CreationFlow: React.FC<Props> = ({
         <View style={styles.cropContent}>
           <View style={[styles.cropFrame, Shadows.large]}>
             {draftImageUri ? (
-              <Image source={{ uri: draftImageUri }} style={styles.cropImage} />
+              <Image 
+                source={{ uri: draftImageUri }} 
+                style={styles.cropImage}
+                onError={(error) => {
+                  console.error('Image failed to load:', error);
+                  Alert.alert('Hata', 'Görüntü yüklenemedi. Lütfen tekrar dene.');
+                }}
+              />
             ) : (
               <View style={[styles.cropPlaceholder, { backgroundColor: colors.surface }]}>
                 <MaterialIcons name="image" size={48} color={colors.textSecondary} />
@@ -361,7 +468,13 @@ export const CreationFlow: React.FC<Props> = ({
         <View style={styles.styleContent}>
           <View style={[styles.previewCard, Shadows.large]}>
             {draftImageUri ? (
-              <Image source={{ uri: draftImageUri }} style={styles.previewImage} />
+              <Image 
+                source={{ uri: draftImageUri }} 
+                style={styles.previewImage}
+                onError={(error) => {
+                  console.error('Preview image failed to load:', error);
+                }}
+              />
             ) : (
               <View style={[styles.previewPlaceholder, { backgroundColor: colors.surface }]}>
                 <MaterialIcons name="image" size={64} color={colors.textSecondary} />
@@ -495,12 +608,20 @@ export const CreationFlow: React.FC<Props> = ({
             <MaterialIcons name="arrow-back" size={24} color={colors.text} />
           </TouchableOpacity>
           <Text style={[styles.headerTitle, { color: colors.text }]}>Metin Ekle</Text>
-          <TouchableOpacity onPress={() => navigate(Screen.PREVIEW)}>
+          <TouchableOpacity onPress={() => {
+            onDraftUpdate({ ...(draft ?? {}), text: stickerText || null });
+            navigate(Screen.PREVIEW);
+          }}>
             <Text style={styles.nextText}>İleri</Text>
           </TouchableOpacity>
         </View>
 
-        <View style={styles.textEditorContent}>
+        <ScrollView
+          style={styles.textEditorContent}
+          contentContainerStyle={styles.textEditorScrollContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={[styles.textPreviewCard, Shadows.large]}>
             {draftImageUri ? (
               <Image source={{ uri: draftImageUri }} style={styles.textPreviewImage} />
@@ -509,58 +630,96 @@ export const CreationFlow: React.FC<Props> = ({
                 <MaterialIcons name="image" size={64} color={colors.textSecondary} />
               </View>
             )}
-            {stickerText && (
+            {stickerText ? (
               <View style={styles.textOverlay}>
                 <Text style={styles.overlayText}>{stickerText}</Text>
               </View>
-            )}
+            ) : null}
           </View>
 
+          <Text style={[styles.textEditorSectionTitle, { color: colors.text }]}>
+            Yazı Ekle
+          </Text>
+          <Text style={[styles.textEditorHint, { color: colors.textSecondary }]}>
+            Stickerına kısa bir yazı ekleyebilirsin (opsiyonel)
+          </Text>
+
           <View style={[styles.textInputContainer, { backgroundColor: colors.surface }]}>
+            <MaterialIcons name="text-fields" size={20} color={colors.textSecondary} style={{ marginRight: 10 }} />
             <TextInput
               style={[styles.textInput, { color: colors.text }]}
-              placeholder="Metin ekle (opsiyonel)"
+              placeholder="Metin gir..."
               placeholderTextColor={colors.textSecondary}
               value={stickerText}
               onChangeText={setStickerText}
               maxLength={30}
+              returnKeyType="done"
             />
-            {stickerText && (
-              <TouchableOpacity onPress={() => setStickerText('')}>
-                <MaterialIcons name="close" size={20} color={colors.textSecondary} />
+            {stickerText ? (
+              <TouchableOpacity onPress={() => setStickerText('')} style={styles.clearInputBtn}>
+                <MaterialIcons name="cancel" size={20} color={colors.textSecondary} />
               </TouchableOpacity>
-            )}
+            ) : null}
           </View>
+          <Text style={[styles.charCount, { color: stickerText.length > 25 ? Colors.warning : colors.textSecondary }]}>
+            {stickerText.length}/30
+          </Text>
 
+          <Text style={[styles.quickTextsTitle, { color: colors.textSecondary }]}>
+            Hızlı Seçim
+          </Text>
           <View style={styles.quickTexts}>
-            {['LOL 😂', 'WOW! 🤩', 'OK 👍', 'NO! 🙅', 'YAY! 🎉'].map((text) => (
+            {['LOL 😂', 'WOW! 🤩', 'OK 👍', 'NO! 🙅', 'YAY! 🎉', 'HI! 👋'].map((text) => (
               <TouchableOpacity
                 key={text}
-                style={[styles.quickTextChip, { backgroundColor: colors.surface }]}
-                onPress={() => setStickerText(text)}
+                style={[
+                  styles.quickTextChip,
+                  { backgroundColor: colors.surface },
+                  stickerText === text && styles.quickTextChipActive,
+                ]}
+                onPress={() => setStickerText(stickerText === text ? '' : text)}
               >
-                <Text style={[styles.quickTextLabel, { color: colors.text }]}>{text}</Text>
+                <Text
+                  style={[
+                    styles.quickTextLabel,
+                    { color: stickerText === text ? Colors.primary : colors.text },
+                  ]}
+                >
+                  {text}
+                </Text>
               </TouchableOpacity>
             ))}
           </View>
-        </View>
+        </ScrollView>
 
-        <View style={[styles.bottomBar, { backgroundColor: colors.background }]}>
-          <TouchableOpacity
-            style={[styles.skipTextBtn, { backgroundColor: colors.surface }]}
-            onPress={() => navigate(Screen.PREVIEW)}
-          >
-            <Text style={[styles.skipTextBtnText, { color: colors.text }]}>Metinsiz Devam</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.addTextBtn, Shadows.primary]}
-            onPress={() => {
-              onDraftUpdate({ ...(draft ?? {}), text: stickerText });
-              navigate(Screen.PREVIEW);
-            }}
-          >
-            <Text style={styles.addTextBtnText}>Metin Ekle</Text>
-          </TouchableOpacity>
+        <View style={[styles.textEditorBottomBar, { backgroundColor: colors.background }]}>
+          <View style={styles.textEditorButtonRow}>
+            <TouchableOpacity
+              style={[styles.skipTextBtn, { backgroundColor: colors.surface, borderColor: colors.border }]}
+              onPress={() => {
+                onDraftUpdate({ ...(draft ?? {}), text: null });
+                navigate(Screen.PREVIEW);
+              }}
+            >
+              <MaterialIcons name="arrow-forward" size={18} color={colors.textSecondary} />
+              <Text style={[styles.skipTextBtnText, { color: colors.text }]}>Atla</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.addTextBtn,
+                Shadows.primary,
+                !stickerText && styles.addTextBtnDisabled,
+              ]}
+              onPress={() => {
+                onDraftUpdate({ ...(draft ?? {}), text: stickerText });
+                navigate(Screen.PREVIEW);
+              }}
+              disabled={!stickerText}
+            >
+              <MaterialIcons name="check" size={18} color={Colors.white} />
+              <Text style={styles.addTextBtnText}>Metin Ekle</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
     );
@@ -628,7 +787,7 @@ export const CreationFlow: React.FC<Props> = ({
           disabled={isSharing}
         >
           <MaterialIcons name="send" size={24} color={Colors.white} />
-          <Text style={styles.whatsappButtonText}>{isSharing ? 'Paylaşılıyor...' : "WhatsApp'a Ekle"}</Text>
+          <Text style={styles.whatsappButtonText}>{isSharing ? 'Hazırlanıyor...' : 'WhatsApp Paketi (3+)'}</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -724,8 +883,11 @@ const styles = StyleSheet.create({
   processingStep: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   processingStepText: { fontSize: 14, fontWeight: '500' },
   textEditorContent: { flex: 1, paddingHorizontal: 24 },
-  textPreviewCard: { height: 280, borderRadius: 24, overflow: 'hidden', marginBottom: 24 },
-  textPreviewImage: { width: '100%', height: '100%' },
+  textEditorScrollContent: { paddingBottom: 20 },
+  textEditorSectionTitle: { fontSize: 20, fontWeight: '700', marginBottom: 6 },
+  textEditorHint: { fontSize: 14, marginBottom: 16, lineHeight: 20 },
+  textPreviewCard: { height: 240, borderRadius: 24, overflow: 'hidden', marginBottom: 24 },
+  textPreviewImage: { width: '100%', height: '100%', resizeMode: 'cover' },
   textPreviewPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   textOverlay: {
     position: 'absolute', bottom: 16, left: 16, right: 16,
@@ -733,18 +895,29 @@ const styles = StyleSheet.create({
   },
   overlayText: { color: Colors.white, fontSize: 18, fontWeight: '700', textAlign: 'center' },
   textInputContainer: {
-    flexDirection: 'row', alignItems: 'center', padding: 16, borderRadius: 16, marginBottom: 16,
+    flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, borderRadius: 16, marginBottom: 4,
   },
-  textInput: { flex: 1, fontSize: 16 },
+  textInput: { flex: 1, fontSize: 16, paddingVertical: 0 },
+  clearInputBtn: { padding: 4 },
+  charCount: { fontSize: 12, fontWeight: '500', textAlign: 'right', marginBottom: 20 },
+  quickTextsTitle: { fontSize: 13, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 },
   quickTexts: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   quickTextChip: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20 },
+  quickTextChipActive: { backgroundColor: 'rgba(233, 30, 99, 0.1)', borderColor: Colors.primary, borderWidth: 1 },
   quickTextLabel: { fontSize: 14, fontWeight: '600' },
-  skipTextBtn: { flex: 1, paddingVertical: 16, borderRadius: 16, alignItems: 'center', marginRight: 12 },
-  skipTextBtnText: { fontSize: 16, fontWeight: '600' },
-  addTextBtn: {
-    flex: 1, backgroundColor: Colors.primary, paddingVertical: 16, borderRadius: 16, alignItems: 'center',
+  textEditorBottomBar: { paddingHorizontal: 24, paddingTop: 12, paddingBottom: 32 },
+  textEditorButtonRow: { flexDirection: 'row', gap: 12 },
+  skipTextBtn: {
+    flex: 1, flexDirection: 'row', paddingVertical: 16, borderRadius: 16,
+    alignItems: 'center', justifyContent: 'center', gap: 6, borderWidth: 1,
   },
-  addTextBtnText: { color: Colors.white, fontSize: 16, fontWeight: '700' },
+  skipTextBtnText: { fontSize: 15, fontWeight: '600' },
+  addTextBtn: {
+    flex: 2, flexDirection: 'row', backgroundColor: Colors.primary,
+    paddingVertical: 16, borderRadius: 16, alignItems: 'center', justifyContent: 'center', gap: 6,
+  },
+  addTextBtnDisabled: { opacity: 0.5 },
+  addTextBtnText: { color: Colors.white, fontSize: 15, fontWeight: '700' },
   previewContent: { flex: 1, paddingHorizontal: 24, paddingTop: 20 },
   finalPreviewCard: { width: width - 48, aspectRatio: 1, borderRadius: 24, overflow: 'hidden', marginBottom: 24, alignSelf: 'center' },
   finalPreviewImage: { width: '100%', height: '100%', resizeMode: 'contain' },

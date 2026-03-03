@@ -2,12 +2,12 @@
   "expo": {
     "name": "FastSticker",
     "slug": "fast-sticker",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "scheme": "faststicker",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "runtimeVersion": {
       "policy": "appVersion"
     },
@@ -37,7 +37,7 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.crosshyper.faststicker",
-      "versionCode": 3,
+      "versionCode": 4,
       "permissions": [
         "CAMERA",
         "READ_MEDIA_IMAGES",

@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const { Jimp, intToRGBA, rgbaToInt, JimpMime } = require('jimp');
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -61,9 +62,127 @@ function buildPrompt(style, text) {
   return [
     styleInstruction,
     textInstruction,
-    'Keep subject centered, remove noisy background, and return one final transparent-like sticker image.',
-    'Do not return explanations, only the generated image.',
+    'Keep only the main subject and remove all background.',
+    'Output must be a PNG sticker with true transparent background (alpha=0 outside subject).',
+    'No scene, no backdrop, no colored background, no shadow plate.',
+    'Do not return explanations, only one generated image.',
   ].join(' ');
+}
+
+function getEdgeColorSamples(image) {
+  const { width, height } = image.bitmap;
+  const samplePoints = [
+    [0, 0],
+    [width - 1, 0],
+    [0, height - 1],
+    [width - 1, height - 1],
+    [Math.floor(width / 2), 0],
+    [Math.floor(width / 2), height - 1],
+    [0, Math.floor(height / 2)],
+    [width - 1, Math.floor(height / 2)],
+  ];
+
+  return samplePoints.map(([x, y]) => intToRGBA(image.getPixelColor(x, y)));
+}
+
+function estimateBackground(samples) {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let weightTotal = 0;
+
+  for (const sample of samples) {
+    const weight = Math.max(1, sample.a);
+    r += sample.r * weight;
+    g += sample.g * weight;
+    b += sample.b * weight;
+    weightTotal += weight;
+  }
+
+  return {
+    r: Math.round(r / weightTotal),
+    g: Math.round(g / weightTotal),
+    b: Math.round(b / weightTotal),
+  };
+}
+
+function colorDistanceSquared(a, b) {
+  const dr = a.r - b.r;
+  const dg = a.g - b.g;
+  const db = a.b - b.b;
+  return dr * dr + dg * dg + db * db;
+}
+
+async function cutBackgroundFromEdges(base64Image) {
+  const input = Buffer.from(base64Image, 'base64');
+  const image = await Jimp.read(input);
+  const { width, height } = image.bitmap;
+
+  if (width < 2 || height < 2) {
+    return null;
+  }
+
+  const samples = getEdgeColorSamples(image);
+  const bg = estimateBackground(samples);
+
+  // Adaptive threshold: tighter for flat backgrounds, looser for noisy ones.
+  const maxSampleDist = samples.reduce(
+    (max, sample) => Math.max(max, colorDistanceSquared(sample, bg)),
+    0
+  );
+  const threshold = Math.max(36, Math.min(82, Math.sqrt(maxSampleDist) + 18));
+  const thresholdSquared = threshold * threshold;
+
+  const total = width * height;
+  const visited = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+
+  const enqueue = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const index = y * width + x;
+    if (visited[index]) return;
+    visited[index] = 1;
+    queue[tail++] = index;
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    enqueue(x, 0);
+    enqueue(x, height - 1);
+  }
+  for (let y = 1; y < height - 1; y += 1) {
+    enqueue(0, y);
+    enqueue(width - 1, y);
+  }
+
+  while (head < tail) {
+    const index = queue[head++];
+    const x = index % width;
+    const y = Math.floor(index / width);
+    const rgba = intToRGBA(image.getPixelColor(x, y));
+
+    const isAlreadyTransparent = rgba.a <= 6;
+    const isLikelyBackground = colorDistanceSquared(rgba, bg) <= thresholdSquared;
+    if (!isAlreadyTransparent && !isLikelyBackground) {
+      continue;
+    }
+
+    if (rgba.a !== 0) {
+      image.setPixelColor(rgbaToInt(rgba.r, rgba.g, rgba.b, 0), x, y);
+    }
+
+    enqueue(x - 1, y);
+    enqueue(x + 1, y);
+    enqueue(x, y - 1);
+    enqueue(x, y + 1);
+  }
+
+  const output = await image.getBuffer(JimpMime.png);
+  return {
+    imageBase64: output.toString('base64'),
+    mimeType: 'image/png',
+  };
 }
 
 app.get('/health', (_req, res) => {
@@ -139,9 +258,22 @@ app.post('/api/generate-sticker', async (req, res) => {
       return res.status(502).json({ error: 'Gemini did not return an image output' });
     }
 
+    let finalImageBase64 = generatedBase64;
+    let finalMimeType = generatedMimeType;
+
+    try {
+      const cutResult = await cutBackgroundFromEdges(generatedBase64);
+      if (cutResult?.imageBase64) {
+        finalImageBase64 = cutResult.imageBase64;
+        finalMimeType = cutResult.mimeType;
+      }
+    } catch (cutError) {
+      console.warn('Background cut skipped:', cutError?.message || cutError);
+    }
+
     return res.json({
-      imageBase64: generatedBase64,
-      mimeType: generatedMimeType,
+      imageBase64: finalImageBase64,
+      mimeType: finalMimeType,
     });
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -152,6 +284,10 @@ app.post('/api/generate-sticker', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`StickerExpo backend listening on http://localhost:${port}`);
-});
+if (require.main === module) {
+  app.listen(port, () => {
+    console.log(`StickerExpo backend listening on http://localhost:${port}`);
+  });
+}
+
+module.exports = app;

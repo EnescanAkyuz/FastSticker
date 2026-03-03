@@ -1,0 +1,82 @@
+diff --git a/node_modules/react-native-whatsapp-sticker-dynamic/android/src/main/java/com/whatsappstickerdynamic/WhatsappStickerDynamicModule.java b/node_modules/react-native-whatsapp-sticker-dynamic/android/src/main/java/com/whatsappstickerdynamic/WhatsappStickerDynamicModule.java
+index 1675137..cb2bdf2 100644
+--- a/node_modules/react-native-whatsapp-sticker-dynamic/android/src/main/java/com/whatsappstickerdynamic/WhatsappStickerDynamicModule.java
++++ b/node_modules/react-native-whatsapp-sticker-dynamic/android/src/main/java/com/whatsappstickerdynamic/WhatsappStickerDynamicModule.java
+@@ -79,6 +79,12 @@ public class WhatsappStickerDynamicModule extends com.whatsappstickerdynamic.Wha
+   public void onNewIntent(Intent intent) {}
+   @Override
+   public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent intent) {
++    // Ignore unrelated activity results (e.g. image picker) to avoid
++    // resolving a null promise and crashing the app.
++    if (requestCode != Const.ADD_PACK_CODE || activityResultPromise == null) {
++      return;
++    }
++
+     WritableMap map = Arguments.createMap();
+     // Left - keys
+     String KEY_CODE = "code";
+@@ -103,29 +109,26 @@ public class WhatsappStickerDynamicModule extends com.whatsappstickerdynamic.Wha
+       }
+     }
+ 
+-    // Match the requestCode ADD PACK : 200
++    // requestCode ADD_PACK_CODE : 200
+     // user_cancelled, validation_error, already_added, user_touched_outside
+-    if (requestCode == Const.ADD_PACK_CODE) {
+-      switch (resultCode){
+-        case Activity.RESULT_OK:
++    switch (resultCode){
++      case Activity.RESULT_OK:
++        isPackValid = true;
++        break;
++      case Activity.RESULT_CANCELED:
++        if(intent==null){
+           isPackValid = true;
+-          break;
+-        case Activity.RESULT_CANCELED:
+-          if(intent==null){
+-            isPackValid = true;
+-            type = "user_touched_outside";
+-            message = "User might have touched outside the alert box whici is similar as [user_cancelled]";
+-          }else if(message != null && message.equals("true")){
+-            isPackValid = true;
+-          }
+-          break;
+-        default:
+-          // not encountered this case yet
+-          type = "unknown";
+-          message = "Issue is unknown";
+-      }
+-
+-    } // elese other requestedCodes if defined
++          type = "user_touched_outside";
++          message = "User might have touched outside the alert box whici is similar as [user_cancelled]";
++        }else if(message != null && message.equals("true")){
++          isPackValid = true;
++        }
++        break;
++      default:
++        // not encountered this case yet
++        type = "unknown";
++        message = "Issue is unknown";
++    }
+ 
+     map.putInt(KEY_CODE, resultCode);
+     map.putString(KEY_TYPE, type);
+@@ -133,6 +136,7 @@ public class WhatsappStickerDynamicModule extends com.whatsappstickerdynamic.Wha
+     map.putBoolean(KEY_VALIDATE, isPackValid);
+ 
+     activityResultPromise.resolve(map);
++    activityResultPromise = null;
+ 
+   }
+ 
+@@ -198,7 +202,7 @@ public class WhatsappStickerDynamicModule extends com.whatsappstickerdynamic.Wha
+       WritableMap result = new Create(context,db).createPack(stickerPack);
+       promise.resolve(result);
+     }catch (Exception e){
+-      promise.reject("Could not add sticker pack to Database");
++      promise.reject("Could not add sticker pack to Database. Exception: " + e.getMessage());
+     }
+   }
+ 

@@ -61,6 +61,13 @@ export interface AppContextType {
   resetDraft: () => void;
   selectedStickerId: string | null;
   setSelectedStickerId: (id: string | null) => void;
+  isPackSelectionMode: boolean;
+  packSelectedStickerIds: string[];
+  startPackSelection: (preselectedIds?: string[]) => void;
+  cancelPackSelection: () => void;
+  togglePackSticker: (stickerId: string) => void;
+  packAfterCreate: boolean;
+  setPackAfterCreate: (value: boolean) => void;
   credits: number;
   remainingCredits: number;
   decrementCredits: () => void;
